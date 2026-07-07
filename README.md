@@ -12,7 +12,7 @@ AI Ollama based project for reading PDF files and answering questions based on t
 * Models pulled from Ollama:
   * LLM - `qwen3:8b`
   * Embedding - `nomic-embed-text`
-* PIP [requirements](doc/requirements.txt)
+* PIP [requirements](ollama_document_analyst/doc/requirements.txt)
 
 ## Installation
 * Download and install [Ollama](https://ollama.com/download)
@@ -25,5 +25,5 @@ AI Ollama based project for reading PDF files and answering questions based on t
 * Launch the `main.py`.
 
 ## User documentation and changelog
-* See [documentation](doc/documentation.rst)
-* See [changelog](doc/changelog.rst)
+* See [documentation](ollama_document_analyst/doc/documentation.rst)
+* See [changelog](ollama_document_analyst/doc/changelog.rst)

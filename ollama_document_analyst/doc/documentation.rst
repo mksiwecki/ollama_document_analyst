@@ -49,7 +49,6 @@ Project Structure
 	│	└── db_metadata.json
 	│
 	├── main.py
-	└── README.md
 
 Troubleshooting
 ---------------
