@@ -1,4 +1,4 @@
-# Ollama Document Analyst - Version 0.6.0
+# Ollama Document Analyst - Version 1.0.0
 AI Ollama based project for reading PDF files and answering questions based on those files.
 
 ## Features

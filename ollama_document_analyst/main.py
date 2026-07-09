@@ -1,15 +1,11 @@
-# TODO: Better history management for memory optimization.
-# TODO: Hash-based PDF file detection.
-# TODO: Avoid printing DELETE DATABASE when creating a new one without deleting the old (after manual removal).
-
 import os
 import json
 import shutil
+import hashlib
 
 from dotenv import load_dotenv
 
-from langchain_ollama import ChatOllama
-from langchain_ollama import OllamaEmbeddings
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 from langchain_chroma import Chroma
 
@@ -22,12 +18,33 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 load_dotenv()
 
+# --- Configuration ---
 DATA_PATH = './data'
 DB_METADATA_PATH = './metadata/db_metadata.json'
 MODEL_NAME = 'nomic-embed-text'
 CHROMA_PATH = './chroma_db'
 LLM_MODEL_NAME = 'qwen3:8b'
+
 CONTEXT_WINDOW = 8192
+CHUNK_SIZE = 2000
+CHUNK_OVERLAP = int(0.2 * CHUNK_SIZE)
+TEMPERATURE = 0
+RETRIEVER_K = 10
+MAX_HISTORY_MESSAGES = 20
+
+EXIT_COMMAND = '/exit'
+TOKEN_COMMAND = '/token'
+
+# --- Metadata & Hashing ---
+def get_file_hash(path):
+	"""Returns the SHA-256 hash of a file."""
+	sha256 = hashlib.sha256()
+
+	with open(path, 'rb') as file:
+		for chunk in iter(lambda: file.read(8192), b''):
+			sha256.update(chunk)
+
+	return sha256.hexdigest()
 
 def get_pdf_metadata():
 	"""Returns metadata for all PDF files in the data directory."""
@@ -36,7 +53,10 @@ def get_pdf_metadata():
 	for filename in sorted(os.listdir(DATA_PATH)):
 		if filename.lower().endswith('.pdf'):
 			path = os.path.join(DATA_PATH, filename)
-			metadata.append({'filename': filename, 'size': os.path.getsize(path), 'modified': os.path.getmtime(path)})
+			metadata.append({
+				'filename': filename,
+				'hash': get_file_hash(path)
+			})
 
 	return metadata
 
@@ -70,19 +90,19 @@ def is_database_up_to_date():
 
 	return saved == current
 
+# --- Vector Store Management ---
 def delete_database():
-	"""Method for deleting a database."""
-	if os.path.exists(CHROMA_PATH):
+	"""Deletes the Chroma database."""
+	if os.path.isdir(CHROMA_PATH) and os.listdir(CHROMA_PATH):
 		print('Deleting previous database...')
 		shutil.rmtree(CHROMA_PATH)
 		print('Database deleted.')
 
 def load_documents():
 	"""Loads documents from the specified data path."""
-	# Load all documents from data directory.
 	loader = DirectoryLoader(DATA_PATH, glob='*.pdf', loader_cls=PyPDFLoader)
 	documents = loader.load()
-	pdf_file_count = len([pdf for pdf in os.listdir(DATA_PATH) if pdf.endswith('.pdf')])
+	pdf_file_count = len([pdf for pdf in os.listdir(DATA_PATH) if pdf.lower().endswith('.pdf')])
 	print(f'Loaded {len(documents)} pages from all [{pdf_file_count}] PDFs.')
 
 	return documents
@@ -90,10 +110,10 @@ def load_documents():
 def split_documents(documents):
 	"""Splits documents into smaller chunks."""
 	text_splitter = RecursiveCharacterTextSplitter(
-		chunk_size=1500, chunk_overlap=300, length_function=len, is_separator_regex=False
+		chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP, length_function=len, is_separator_regex=False
 	)
 	all_splits = text_splitter.split_documents(documents)
-	print(f'Split into {len(all_splits)} chunks.\n')
+	print(f'Split into {len(all_splits)} chunks.')
 
 	return all_splits
 
@@ -132,10 +152,10 @@ def load_vector_store(embedding_function, persist_directory=CHROMA_PATH):
 	return vector_store
 
 def initialize_vector_store(embedding_function):
-	"""Method for initializing vector_store for RAG chain."""
+	"""Initializes the vector store for the RAG chain."""
 	print('Checking database state...')
 
-	if is_database_up_to_date() and os.listdir(CHROMA_PATH):
+	if is_database_up_to_date() and os.path.isdir(CHROMA_PATH) and os.listdir(CHROMA_PATH):
 		print('Loading existing database...\n')
 		return load_vector_store(embedding_function)
 
@@ -145,19 +165,41 @@ def initialize_vector_store(embedding_function):
 	print('Building new database...\n')
 	return create_vector_store(embedding_function)
 
+# --- RAG Chain & Querying ---
+def format_docs(docs):
+	"""Joins document chunks into a single context string."""
+	return '\n'.join(doc.page_content for doc in docs)
+
+def get_sources(docs):
+	"""Extracts unique 'filename - page' sources from retrieved documents."""
+	seen = set()
+	sources = list()
+
+	for doc in docs:
+		filename = os.path.basename(doc.metadata.get('source', 'Unknown'))
+		page = doc.metadata.get('page')
+		page_display = page + 1 if isinstance(page, int) else '?'
+		label = f'{filename} - page {page_display}'
+
+		if label not in seen:
+			seen.add(label)
+			sources.append(label)
+
+	return sources
+
 def create_rag_chain(vector_store, llm_model_name=LLM_MODEL_NAME, context_window=CONTEXT_WINDOW):
 	"""Creates the RAG chain."""
 	# Initialize the LLM.
-	llm = ChatOllama(model=llm_model_name, temperature=0.2, num_ctx=context_window)
+	llm = ChatOllama(model=llm_model_name, temperature=TEMPERATURE, num_ctx=context_window)
 	print(f'Initialized ChatOllama with model: {llm_model_name} - Context window: {context_window}.')
 
 	# Create the retriever.
-	retriever = vector_store.as_retriever(search_type='similarity', search_kwargs={'k': 10})
+	retriever = vector_store.as_retriever(search_type='similarity', search_kwargs={'k': RETRIEVER_K})
 	print('Retriever initialized.')
 
 	# Define the prompt template.
 	template = """
-You are aa analyst of the given PDF files.
+You are an analyst of the given PDF files.
 
 Use the conversation history and the context to answer.
 
@@ -175,9 +217,15 @@ Question:
 
 	# Define the RAG chain using LCEL.
 	rag_chain = (
-			{'context': (lambda x: x["question"]) | retriever, 'question': RunnablePassthrough(),
-			 'history': RunnablePassthrough()}
-			| prompt | llm
+		RunnablePassthrough.assign(
+			source_docs=(lambda x: x['question']) | retriever
+		)
+		| RunnablePassthrough.assign(
+			context=lambda x: format_docs(x['source_docs'])
+		)
+		| RunnablePassthrough.assign(
+			answer=prompt | llm
+		)
 	)
 	print('RAG chain created.')
 
@@ -185,20 +233,32 @@ Question:
 
 def query_rag(chain, question, history):
 	"""Queries the RAG chain and prints the response."""
-	if question != '/token':
+	if question != TOKEN_COMMAND:
 		print('\nAnalyst is thinking...')
 
-	response = chain.invoke({
+	result = chain.invoke({
 		'question': question,
 		'history': history
 	})
 
-	if question != '/token':
+	if question != TOKEN_COMMAND:
 		print(f'Question: {question}')
 		print('\nResponse:')
-		print(response.content)
+		print(result['answer'].content)
 
-	return response
+		print('\nSources:')
+		for source in get_sources(result['source_docs']):
+			print(f'{source}')
+
+		print('\n')
+
+	return result
+
+# --- Chat History ---
+def trim_history(history, max_messages=MAX_HISTORY_MESSAGES):
+	"""Keeps only the latest conversation messages."""
+	if len(history) > max_messages:
+		del history[:-max_messages]
 
 # --- Main Execution! ---
 if __name__ == '__main__':
@@ -213,17 +273,26 @@ if __name__ == '__main__':
 
 	# 4. Running program.
 	chat_history = list()
-	print('\nAI PDF Analyst ready.\nType /exit to quit.\nType /token to see token count.\n')
+	print(
+		f'\nAI PDF Analyst ready.'
+		f'\nType {EXIT_COMMAND} to quit.'
+		f'\nType {TOKEN_COMMAND} to see token count.\n'
+	)
+
 	while True:
 		question = input('(You): ')
 
-		if question.strip().lower() == '/exit':
+		if question.strip() == EXIT_COMMAND:
 			print('Exiting...')
 			break
 
-		if question.strip().lower() == '/token':
+		if question.strip() == TOKEN_COMMAND:
 			response = query_rag(rag_chain, question, chat_history)
-			total_usage = response.response_metadata['prompt_eval_count'] + response.response_metadata['eval_count']
+
+			eval_count = response['answer'].response_metadata['eval_count']
+			prompt_eval_count = response['answer'].response_metadata['prompt_eval_count']
+
+			total_usage = eval_count + prompt_eval_count
 			remaining = CONTEXT_WINDOW - total_usage
 			remaining_percentage = (remaining / CONTEXT_WINDOW) * 100
 
@@ -236,6 +305,12 @@ if __name__ == '__main__':
 		else:
 			response = query_rag(rag_chain, question, chat_history)
 
-		# Update chat history.
-		chat_history.append({'role': 'user', 'content': question})
-		chat_history.append({'role': 'assistant', 'content': response})
+		chat_history.append({
+			'role': 'user',
+			'content': question
+		})
+		chat_history.append({
+			'role': 'assistant',
+			'content': response['answer'].content
+		})
+		trim_history(chat_history)

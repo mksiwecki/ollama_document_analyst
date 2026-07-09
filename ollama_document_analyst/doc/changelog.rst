@@ -1,3 +1,25 @@
+v1.0.0
+======
+* Cleanup and optimization.
+* Printing sources with response.
+
+v0.8.1
+======
+* Cleanup and optimization.
+
+v0.8.0
+======
+* Modified metadata to operate on hash.
+
+v0.7.1
+======
+* Fixed printing info about deleting database when launching fresh instance.
+
+v0.7.0
+======
+* Changed chunk size, chunk overlap size, temperature and search kwargs to global variables.
+* Added better history management.
+
 v0.6.0
 ======
 * Implemented option for showing token usage.
